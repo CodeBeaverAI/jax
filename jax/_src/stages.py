@@ -737,14 +737,13 @@ class Traced(Stage):
                "_args_flat", "_arg_names", "_num_consts"]
 
   def __init__(self, jaxpr: core.ClosedJaxpr, args_info, fun_name, out_tree,
-               lower_callable, abstract_mesh=mesh_lib.empty_abstract_mesh,
-               args_flat=None, arg_names=None, num_consts: int = 0):
+               lower_callable, args_flat=None, arg_names=None,
+               num_consts: int = 0):
     self.jaxpr = jaxpr
     self.args_info = args_info
     self.fun_name = fun_name
     self._out_tree = out_tree
     self._lower_callable = lower_callable
-    self._abstract_mesh = abstract_mesh
     self._args_flat = args_flat
     self._arg_names = arg_names
     self._num_consts = num_consts
@@ -765,10 +764,7 @@ class Traced(Stage):
         self._lower_callable, lowering_platforms=lowering_platforms,
         lowering_parameters=_private_parameters)
     try:
-      # TODO(yashkatariya): Maybe thread this into pjit params like resource_env
-      # and set the context manager down the stack?
-      with mesh_lib.set_abstract_mesh(self._abstract_mesh):
-        lowering = new_callable()
+      lowering = new_callable()
     except pxla.DeviceAssignmentMismatchError as e:
       fails, = e.args
       msg = pjit._device_assignment_mismatch_error(
