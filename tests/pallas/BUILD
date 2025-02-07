@@ -189,6 +189,28 @@ jax_multiplatform_test(
 )
 
 jax_multiplatform_test(
+    name = "mosaic_gpu_progressive_lowering_test",
+    srcs = [
+        "mosaic_gpu_progressive_lowering_test.py",
+    ],
+    enable_backends = [],
+    enable_configs = [
+        "gpu_h100_x32",
+        "gpu_h100",
+    ],
+    env = {
+        "JAX_PALLAS_USE_MOSAIC_GPU": "1",
+        "JAX_PALLAS_VERBOSE_ERRORS": "0",
+        "JAX_PALLAS_USE_MOSAIC_GPU_PROGRESSIVE_LOWERING": "1",
+    },
+    deps = [
+        "//jax:pallas",
+        "//jax:pallas_mosaic_gpu",  # build_cleaner: keep
+        "//jax/_src/pallas/mosaic_gpu",
+    ] + py_deps("absl/testing") + py_deps("numpy"),
+)
+
+jax_multiplatform_test(
     name = "export_back_compat_pallas_test",
     srcs = ["export_back_compat_pallas_test.py"],
     enable_backends = ["cpu"],

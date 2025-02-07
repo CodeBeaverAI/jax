@@ -59,6 +59,10 @@ _lowerings: dict[str, MlirLoweringRule] = {}
 def _fragmented_array_to_ir(
     fragmented_array: fa.FragmentedArray, ty: ir.Type
 ) -> ir.Value:
+  """Converts a FragmentedArray to an IR value.
+
+  The fragmented array's signedness is omitted from the IR representation.
+  """
   conversion_cast = builtin.UnrealizedConversionCastOp(
       [ty], fragmented_array.registers.flatten().tolist()
   )
@@ -72,16 +76,13 @@ def _fragmented_array_to_ir(
       fragmented_array.layout
   )
 
-  if fragmented_array.is_signed is not None:
-    conversion_cast.attributes["is_signed"] = ir.BoolAttr.get(
-        fragmented_array.is_signed
-    )
   return conversion_cast.result
 
 
 # TODO(bchetioui): add code that verifies the layout is as inferred.
 def _fragmented_array_from_ir(
     fragmented_array_as_ir: ir.Value,
+    is_signed: bool | None = None,
 ) -> fa.FragmentedArray:
 
   conversion_cast = cast(
@@ -109,14 +110,23 @@ def _fragmented_array_from_ir(
   )
   layout = layouts.from_layout_attr(conversion_cast.attributes["layout"])
 
-  if ir.IntegerType.isinstance(conversion_cast.outputs[0].type):
-    is_signed = bool(conversion_cast.attributes["is_signed"])
-  else:
-    is_signed = None
-
   return fa.FragmentedArray(
       _registers=registers, _layout=layout, _is_signed=is_signed
   )
+
+
+def signedness(vector_type: ir.VectorType) -> bool | None:
+  """Returns the signedness of the vector type.
+
+  Args:
+    vector_type: a vector type.
+  Returns:
+    True if the vector's underlying element type is a signed integer type, False
+    if it is an unsigned integer type, and None otherwise.
+  """
+  if ir.IntegerType.isinstance(vector_type.element_type):
+    return ir.IntegerType(vector_type.element_type).is_signed
+  return None
 
 
 # TODO(dasenov): Remove this when minimum jaxlib version >= 0.5.1.
@@ -199,7 +209,10 @@ def _vector_load_op_lowering_rule(
           f"for {vector_load_op}"
       )
 
-  fragmented_array = fa.FragmentedArray.load_strided(vector_load_op.base)
+  is_signed = signedness(vector_load_op.result.type)
+  fragmented_array = fa.FragmentedArray.load_strided(
+      vector_load_op.base, is_signed=is_signed
+  )
   return [_fragmented_array_to_ir(fragmented_array, vector_load_op.result.type)]
 
 
@@ -219,7 +232,10 @@ def _vector_store_op_lowering_rule(
           f"for {vector_store_op}"
       )
 
-  fragmented_array = _fragmented_array_from_ir(vector_store_op.valueToStore)
+  is_signed = signedness(vector_store_op.valueToStore.type)
+  fragmented_array = _fragmented_array_from_ir(
+      vector_store_op.valueToStore, is_signed=is_signed
+  )
 
   # TODO(dasenov): This is not efficient for WGMMA layouts
   fragmented_array.store_untiled(vector_store_op.base)
@@ -276,12 +292,15 @@ def _mgpu_async_store_op_lowering_rule(
 
 
 @_register_lowering(arith.AddFOp)
-def _arith_addf_op_lowering_rule(
-    _: LoweringContext, add: arith.AddFOp
+@_register_lowering(arith.AddIOp)
+def _arith_add_op_lowering_rule(
+    _: LoweringContext, add: arith.AddFOp | arith.AddIOp
 ) -> Sequence[ir.Value]:
 
-  fragmented_array_lhs = _fragmented_array_from_ir(add.lhs)
-  fragmented_array_rhs = _fragmented_array_from_ir(add.rhs)
+  is_signed = None if isinstance(add, arith.AddFOp) else False
+
+  fragmented_array_lhs = _fragmented_array_from_ir(add.lhs, is_signed)
+  fragmented_array_rhs = _fragmented_array_from_ir(add.rhs, is_signed)
 
   return [
       _fragmented_array_to_ir(
@@ -367,6 +386,11 @@ def single_thread_predicates(module: ir.Module) -> tuple[ir.Value, ir.Value]:
   return block_predicate, warpgroup_predicate
 
 
+def _should_lower(op: ir.OpView) -> bool:
+  """Returns 'true' if the operation should be lowered."""
+  return op.name.startswith("mosaic_gpu.") or layouts.should_have_layout(op)
+
+
 def lower_mgpu_dialect(
     module: ir.Module, launch_context: launch_context.LaunchContext | None
 ):
@@ -390,7 +414,7 @@ def lower_mgpu_dialect(
   ctx = LoweringContext(launch_context, block_predicate, warpgroup_predicate)
 
   def _lower_op(op: ir.OpView):
-    if op.name not in _lowerings:
+    if op.name not in _lowerings or not _should_lower(op):
       return
     lowering_rule = _lowerings[op.name]
 

@@ -1207,9 +1207,19 @@ _PALLAS_USE_MOSAIC_GPU = config.bool_flag(
     default=config.bool_env("JAX_PALLAS_USE_MOSAIC_GPU", False),
     help=(
         "If True, lower Pallas kernels to the experimental Mosaic GPU"
-        " dialect, instead of Trition IR."
+        " dialect, instead of Triton IR."
     ),
 )
+
+_PALLAS_USE_MOSAIC_GPU_PROGRESSIVE_LOWERING = config.bool_flag(
+    "jax_pallas_use_mosaic_gpu_progressive_lowering",
+    default=config.bool_env("JAX_PALLAS_USE_MOSAIC_GPU_PROGRESSIVE_LOWERING", False),
+    help=(
+        "If True, uses a progressive lowering path when using Mosaic GPU as "
+        "the backend. This is experimental and may not work for all kernels."
+    ),
+)
+
 _PALLAS_VERBOSE_ERRORS = config.bool_flag(
     "jax_pallas_verbose_errors",
     default=config.bool_env("JAX_PALLAS_VERBOSE_ERRORS", True),
@@ -1272,24 +1282,25 @@ def _pallas_call_lowering(
                    *in_nodes: mlir.ir.Value | Sequence[mlir.ir.Value],
                    **params):
     try:
-      match backend:
-        case "mosaic_gpu":
-          from jax._src.pallas.mosaic_gpu import pallas_call_registration
-        case "triton":
-          from jax._src.pallas.triton import pallas_call_registration  # type: ignore
-        case None:
-          if _PALLAS_USE_MOSAIC_GPU.value:
-            from jax._src.pallas.mosaic_gpu import pallas_call_registration
-          else:
-            from jax._src.pallas.triton import pallas_call_registration  # type: ignore
-        case _:
-          raise ValueError(f"Unsupported backend: {backend}")
+      if backend == "mosaic_gpu" or backend is None and _PALLAS_USE_MOSAIC_GPU.value:
+        import jax.experimental.mosaic.gpu.core as mosaic_core
+        from jax._src.pallas.mosaic_gpu import pallas_call_registration
+        if _PALLAS_USE_MOSAIC_GPU_PROGRESSIVE_LOWERING.value:
+          thread_semantics = mosaic_core.ThreadSemantics.Warpgroup
+          mosaic_core.dialect.register_dialect(ctx.module_context.context)
+        else:
+          thread_semantics = mosaic_core.ThreadSemantics.Lane
+        lowering_fn = partial(pallas_call_registration.pallas_call_lowering,
+                              thread_semantics=thread_semantics)
+      elif backend == "triton" or backend is None:
+        from jax._src.pallas.triton import pallas_call_registration  # type: ignore
+        lowering_fn = pallas_call_registration.pallas_call_lowering
+      else:
+        raise ValueError(f"Unsupported backend: {backend}")
     except ImportError as e:
       raise _unsupported_lowering_error("gpu")
 
-    return pallas_call_registration.pallas_call_lowering(
-        ctx, *in_nodes, **params
-    )
+    return lowering_fn(ctx, *in_nodes, **params)
 
   return mlir.lower_per_platform(ctx, "pallas_call",
                                  dict(cpu=cpu_lowering,
